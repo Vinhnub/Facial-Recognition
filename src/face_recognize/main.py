@@ -2,8 +2,8 @@ import cv2
 import joblib
 import numpy as np
 
-model = joblib.load("models/lbp_model.pkl")
-label_map = joblib.load("models/label_map.pkl")
+model = joblib.load(r"E:\PythonFile\Project\Facial-Recognition\src\face_recognize\models/lbp_model.pkl")
+label_map = joblib.load(r"E:\PythonFile\Project\Facial-Recognition\src\face_recognize\models/label_map.pkl")
 
 # =============================
 # LBP FEATURE
@@ -40,7 +40,7 @@ def lbp_feature(img):
 # =============================
 # LOAD IMAGE
 # =============================
-img_path = r"C:\Users\Lenovo\Desktop\face_recognize\test\WIN_20260317_16_07_29_Pro.jpg"
+img_path = r"C:\Users\admin\Downloads\dataset\test\z7623391816667_1ae7a8d6802324466546ab4251ea5add.jpg"
 
 img = cv2.imread(img_path)
 
@@ -53,7 +53,7 @@ gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 # =============================
 # FACE DETECT
 # =============================
-face_cascade = cv2.CascadeClassifier("haarcascade_frontalface_default.xml")
+face_cascade = cv2.CascadeClassifier(r"E:\PythonFile\Project\Facial-Recognition\src\face_recognize\haarcascade_frontalface_default.xml")
 
 faces = face_cascade.detectMultiScale(
     gray,

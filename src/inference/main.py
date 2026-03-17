@@ -2,16 +2,14 @@ import torch
 import torch.nn as nn
 from torchvision import models, transforms
 from PIL import Image
-import numpy as np
 import cv2
+import os
+import numpy as np
 import joblib
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# =============================
-# STDN+ MODEL (ANTI SPOOF)
-# =============================
-
+# ================= MODEL SPOOF =================
 class STDN_Plus_Model(nn.Module):
     def __init__(self):
         super(STDN_Plus_Model, self).__init__()
@@ -20,16 +18,16 @@ class STDN_Plus_Model(nn.Module):
         self.encoder = nn.Sequential(*list(base_resnet.children())[:-2])
 
         self.decoder_live = nn.Sequential(
-            nn.ConvTranspose2d(512,128,4,2,1), nn.ReLU(),
-            nn.ConvTranspose2d(128,64,4,2,1), nn.ReLU(),
+            nn.ConvTranspose2d(512,128,4,2,1), nn.InstanceNorm2d(128), nn.ReLU(),
+            nn.ConvTranspose2d(128,64,4,2,1), nn.InstanceNorm2d(64), nn.ReLU(),
             nn.ConvTranspose2d(64,32,4,2,1), nn.ReLU(),
             nn.ConvTranspose2d(32,16,4,2,1), nn.ReLU(),
             nn.ConvTranspose2d(16,1,4,2,1), nn.Sigmoid()
         )
 
         self.decoder_trace = nn.Sequential(
-            nn.ConvTranspose2d(512,128,4,2,1), nn.ReLU(),
-            nn.ConvTranspose2d(128,64,4,2,1), nn.ReLU(),
+            nn.ConvTranspose2d(512,128,4,2,1), nn.InstanceNorm2d(128), nn.ReLU(),
+            nn.ConvTranspose2d(128,64,4,2,1), nn.InstanceNorm2d(64), nn.ReLU(),
             nn.ConvTranspose2d(64,32,4,2,1), nn.ReLU(),
             nn.ConvTranspose2d(32,16,4,2,1), nn.ReLU(),
             nn.ConvTranspose2d(16,3,4,2,1), nn.Tanh()
@@ -43,123 +41,168 @@ class STDN_Plus_Model(nn.Module):
         )
 
     def forward(self,x):
-        f = self.encoder(x)
-        return self.decoder_live(f), self.decoder_trace(f), self.classifier(f)
+        features = self.encoder(x)
+        _, _ = self.decoder_live(features), self.decoder_trace(features)
+        cls_out = self.classifier(features)
+        return cls_out
 
 
-stdn_model = STDN_Plus_Model().to(DEVICE)
-stdn_model.load_state_dict(torch.load("src/train/stdn_plus_pami.pth", map_location=DEVICE))
-stdn_model.eval()
+# ================= LOAD MODELS =================
+# Spoof model
+spoof_model = STDN_Plus_Model().to(DEVICE)
+spoof_model.load_state_dict(torch.load("src/train/stdn_plus_pami.pth", map_location=DEVICE))
+spoof_model.eval()
 
-# =============================
-# SVM MODEL (FACE RECOGNITION)
-# =============================
+# Face recognition model
+face_model = joblib.load(r"E:\PythonFile\Project\Facial-Recognition\src\face_recognize\models/knn_model.pkl")
+label_map = joblib.load(r"E:\PythonFile\Project\Facial-Recognition\src\face_recognize\models/label_map.pkl")
 
-svm_model = joblib.load("models/best_svm_model.pkl")
-scaler = joblib.load("models/scaler.pkl")
-kpca = joblib.load("models/kpca.pkl")
-label_map = joblib.load("models/label_map.pkl")
+# Face detector
+face_cascade = cv2.CascadeClassifier(
+    r"E:\PythonFile\Project\Facial-Recognition\src\face_recognize\haarcascade_frontalface_default.xml"
+)
 
-# =============================
-# TRANSFORM STDN+
-# =============================
+print("All models loaded!")
 
+# ================= TRANSFORM =================
 transform = transforms.Compose([
     transforms.Resize((256,256)),
     transforms.ToTensor(),
 ])
 
-# =============================
-# FEATURE (SVM)
-# =============================
 
+# ================= LBP =================
 def lbp_feature(img):
     h, w = img.shape
     lbp = np.zeros((h-2, w-2), dtype=np.uint8)
 
     for i in range(1, h-1):
         for j in range(1, w-1):
-            c = img[i,j]
+            center = img[i, j]
             binary = [
-                img[i-1,j-1]>c, img[i-1,j]>c, img[i-1,j+1]>c,
-                img[i,j+1]>c,
-                img[i+1,j+1]>c, img[i+1,j]>c, img[i+1,j-1]>c,
-                img[i,j-1]>c
+                img[i-1,j-1] > center,
+                img[i-1,j] > center,
+                img[i-1,j+1] > center,
+                img[i,j+1] > center,
+                img[i+1,j+1] > center,
+                img[i+1,j] > center,
+                img[i+1,j-1] > center,
+                img[i,j-1] > center
             ]
-            value = sum([b << k for k,b in enumerate(binary)])
+            value = sum([b << k for k, b in enumerate(binary)])
             lbp[i-1,j-1] = value
 
     hist,_ = np.histogram(lbp.ravel(),256,[0,256])
+    hist = hist.astype("float")
+    hist /= (hist.sum() + 1e-7)
     return hist
 
 
-def gabor_feature(img):
-    kernels = []
-    for theta in np.arange(0, np.pi, np.pi/4):
-        k = cv2.getGaborKernel((9,9),1.0,theta,np.pi/2,0.5,0)
-        kernels.append(k)
-
-    feats = []
-    for k in kernels:
-        f = cv2.filter2D(img, cv2.CV_32F, k)
-        feats.append(f.flatten())
-
-    return np.hstack(feats)
-
-
-def extract_feature(face):
-    return np.hstack([gabor_feature(face), lbp_feature(face)])
-
-
-# =============================
-# FULL PIPELINE
-# =============================
-
-def predict_full(image_path):
-
-    # ===== STEP 1: ANTI SPOOF =====
-    img_pil = Image.open(image_path).convert("RGB")
+# ================= SPOOF =================
+def predict_spoof(frame):
+    img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    img_pil = Image.fromarray(img)
     img_tensor = transform(img_pil).unsqueeze(0).to(DEVICE)
 
     with torch.no_grad():
-        _, _, cls_out = stdn_model(img_tensor)
+        cls_out = spoof_model(img_tensor)
         pred = torch.argmax(cls_out, dim=1).item()
 
-    if pred == 0:
-        print("FAKE ❌")
-        return
+    return "REAL" if pred == 1 else "FAKE"
 
-    print("REAL ✅")
 
-    # ===== STEP 2: FACE RECOGNITION =====
-    img_cv = cv2.imread(image_path)
-    gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+# ================= FACE RECOGNITION =================
+def recognize_face(frame):
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-    face_cascade = cv2.CascadeClassifier("haarcascade_frontalface_default.xml")
-    faces = face_cascade.detectMultiScale(gray,1.3,5)
+    faces = face_cascade.detectMultiScale(gray, 1.2, 6)
 
-    if len(faces) == 0:
-        print("No face detected")
-        return
+    results = []
 
     for (x,y,w,h) in faces:
+        pad = int(0.2 * w)
 
-        face = gray[y:y+h, x:x+w]
+        y1 = max(0, y-pad)
+        y2 = min(gray.shape[0], y+h+pad)
+        x1 = max(0, x-pad)
+        x2 = min(gray.shape[1], x+w+pad)
+
+        face = gray[y1:y2, x1:x2]
         face = cv2.resize(face,(80,70))
         face = cv2.equalizeHist(face)
 
-        feature = extract_feature(face).reshape(1,-1)
-        feature = scaler.transform(feature)
-        feature = kpca.transform(feature)
+        feature = lbp_feature(face).reshape(1,-1)
 
-        pred = svm_model.predict(feature)
-        name = label_map[int(pred[0])]
+        probs = face_model.predict_proba(feature)
+        confidence = np.max(probs)
+        pred = np.argmax(probs)
 
-        print("IDENTITY:", name)
+        if confidence < 0.5:
+            name = "Unknown"
+        else:
+            name = label_map[pred]
+
+        results.append((x,y,w,h,name,confidence))
+
+    return results
 
 
-# =============================
-# TEST
-# =============================
+# ================= CAMERA =================
+cap = cv2.VideoCapture(0)
 
-predict_full(r"E:\PythonFile\Project\Facial-Recognition\data\test\z7623414547355_787c4c547fc530947ade927cbb1d7125.jpg")
+label = ""
+
+print("SPACE: Capture | ESC: Exit")
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
+
+    display = frame.copy()
+
+    cv2.putText(display, "SPACE: Capture | ESC: Exit",
+                (10,30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2)
+
+    # hiển thị kết quả
+    if label != "":
+        cv2.putText(display, label,
+                    (20,80), cv2.FONT_HERSHEY_SIMPLEX,
+                    1.2, (0,255,0), 3)
+
+    cv2.imshow("Anti-Spoof + FaceID", display)
+
+    key = cv2.waitKey(1)
+
+    if key == 27:
+        break
+
+    elif key == 32:  # SPACE
+        spoof = predict_spoof(frame)
+
+        if spoof == "FAKE":
+            label = "FAKE"
+            print("FAKE detected")
+            faces = recognize_face(frame)
+            texts = []
+            for (_,_,_,_,name,conf) in faces:
+                    texts.append(f"{name} ({conf:.2f})")
+
+            label = "FAKE - " + ", ".join(texts)
+
+        else:
+            faces = recognize_face(frame)
+
+            if len(faces) == 0:
+                label = "REAL - No face"
+            else:
+                texts = []
+                for (_,_,_,_,name,conf) in faces:
+                    texts.append(f"{name} ({conf:.2f})")
+
+                label = "REAL - " + ", ".join(texts)
+
+            print(label)
+
+cap.release()
+cv2.destroyAllWindows()
