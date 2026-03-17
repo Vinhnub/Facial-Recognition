@@ -9,7 +9,7 @@ person_path = os.path.join(dataset_path, person_name)
 
 os.makedirs(person_path, exist_ok=True)
 
-face_cascade = cv2.CascadeClassifier("haarcascade_frontalface_default.xml")
+face_cascade = cv2.CascadeClassifier("E:/PythonFile/Project/Facial-Recognition/src/face_recognize/haarcascade_frontalface_default.xml")
 
 if face_cascade.empty():
     print("Error loading Haar Cascade")

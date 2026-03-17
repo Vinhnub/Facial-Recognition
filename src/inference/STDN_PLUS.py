@@ -2,8 +2,8 @@ import torch
 import torch.nn as nn
 from torchvision import models, transforms
 from PIL import Image
-import matplotlib.pyplot as plt
-import numpy as np
+import cv2
+import os
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -40,8 +40,7 @@ class STDN_Plus_Model(nn.Module):
 
     def forward(self,x):
         features = self.encoder(x)
-        I_live = self.decoder_live(features)
-        S_trace = self.decoder_trace(features)
+        I_live, S_trace = self.decoder_live(features), self.decoder_trace(features)
         cls_out = self.classifier(features)
         return I_live, S_trace, cls_out
 
@@ -60,48 +59,68 @@ transform = transforms.Compose([
 ])
 
 
-# ================= PREDICT + VISUALIZE =================
-def predict_and_show(image_path):
+# ================= PREDICT =================
+def predict_image(frame):
+    img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    img_pil = Image.fromarray(img)
 
-    img = Image.open(image_path).convert("RGB")
-    img_tensor = transform(img).unsqueeze(0).to(DEVICE)
+    img_tensor = transform(img_pil).unsqueeze(0).to(DEVICE)
 
     with torch.no_grad():
-        depth_map, trace_map, cls_out = model(img_tensor)
+        _, _, cls_out = model(img_tensor)
         pred = torch.argmax(cls_out, dim=1).item()
 
-    label = "REAL" if pred == 1 else "FAKE"
+    return "REAL" if pred == 1 else "FAKE"
 
-    # convert tensor → numpy
-    img_np = img_tensor.squeeze().cpu().permute(1,2,0).numpy()
-    depth_np = depth_map.squeeze().cpu().numpy()
-    trace_np = trace_map.squeeze().cpu().permute(1,2,0).numpy()
 
-    # normalize trace for visualization
-    trace_np = (trace_np - trace_np.min()) / (trace_np.max() - trace_np.min())
+# ================= CAMERA =================
+save_dir = "captured"
+os.makedirs(save_dir, exist_ok=True)
 
-    # ================= PLOT =================
-    # plt.figure(figsize=(12,4))
+cap = cv2.VideoCapture(0)
 
-    # plt.subplot(1,3,1)
-    # plt.imshow(img_np)
-    # plt.title("Input Image")
-    # plt.axis("off")
+print("SPACE: chụp | ESC: thoát")
 
-    # plt.subplot(1,3,2)
-    # plt.imshow(depth_np, cmap="jet")
-    # plt.title("Predicted Depth")
-    # plt.axis("off")
+count = 0
+label = ""  # lưu kết quả gần nhất
 
-    # plt.subplot(1,3,3)
-    # plt.imshow(trace_np)
-    # plt.title("Spoof Trace")
-    # plt.axis("off")
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
 
-    # plt.suptitle(f"Prediction: {label}", fontsize=16)
+    display_frame = frame.copy()
 
-    # plt.show()
-    print(label)
+    # hiển thị hướng dẫn
+    cv2.putText(display_frame, "SPACE: Capture | ESC: Exit",
+                (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
+                0.7, (255,255,255), 2)
 
-# # ================= TEST =================
-predict_and_show(r"E:\PythonFile\Project\Facial-Recognition\data\test\z7623414547355_787c4c547fc530947ade927cbb1d7125.jpg")
+    # hiển thị kết quả nếu có
+    if label != "":
+        color = (0,255,0) if label == "REAL" else (0,0,255)
+        cv2.putText(display_frame, f"{label}",
+                    (20, 80), cv2.FONT_HERSHEY_SIMPLEX,
+                    1.5, color, 3)
+
+    cv2.imshow("Camera Anti-Spoofing", display_frame)
+
+    key = cv2.waitKey(1)
+
+    if key == 27:  # ESC
+        break
+
+    elif key == 32:  # SPACE
+        filename = os.path.join(save_dir, f"capture_{count}.jpg")
+        cv2.imwrite(filename, frame)
+
+        print(f"Saved: {filename}")
+
+        # predict và lưu label
+        label = predict_image(frame)
+        print("Prediction:", label)
+
+        count += 1
+
+cap.release()
+cv2.destroyAllWindows()
