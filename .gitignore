@@ -209,3 +209,5 @@ __marimo__/
 # Data 
 data/raw/
 data
+video
+src/train/*.pkl
