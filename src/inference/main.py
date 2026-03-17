@@ -1,179 +1,165 @@
-import cv2
+import torch
+import torch.nn as nn
+from torchvision import models, transforms
+from PIL import Image
 import numpy as np
-import time
-from src.feature_extraction.lbp_u import *
+import cv2
 import joblib
 
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# ==========================
-# BUTTON CLASS
-# ==========================
+# =============================
+# STDN+ MODEL (ANTI SPOOF)
+# =============================
 
-class Button:
-
-    def __init__(self, x, y, w, h, text):
-        self.x = x
-        self.y = y
-        self.w = w
-        self.h = h
-        self.text = text
-
-    def draw(self, frame):
-
-        cv2.rectangle(
-            frame,
-            (self.x, self.y),
-            (self.x + self.w, self.y + self.h),
-            (0, 200, 0),
-            -1
-        )
-
-        cv2.putText(
-            frame,
-            self.text,
-            (self.x + 15, self.y + 35),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.8,
-            (255, 255, 255),
-            2
-        )
-
-    def is_clicked(self, x, y):
-
-        if self.x < x < self.x + self.w and \
-           self.y < y < self.y + self.h:
-
-            return True
-
-        return False
-
-
-# ==========================
-# CAMERA APP
-# ==========================
-
-class CameraRecorder:
-
+class STDN_Plus_Model(nn.Module):
     def __init__(self):
+        super(STDN_Plus_Model, self).__init__()
 
-        self.cap = cv2.VideoCapture(0)
+        base_resnet = models.resnet18(pretrained=False)
+        self.encoder = nn.Sequential(*list(base_resnet.children())[:-2])
 
-        self.record_button = Button(20, 20, 160, 50, "Record 4s")
-
-        self.recording = False
-        self.start_time = None
-
-        self.frames = []
-
-    # ==========================
-
-    def mouse_callback(self, event, x, y, flags, param):
-
-        if event == cv2.EVENT_LBUTTONDOWN:
-
-            if self.record_button.is_clicked(x, y):
-
-                print("Start recording...")
-
-                self.recording = True
-                self.start_time = time.time()
-                self.frames = []
-
-    # ==========================
-
-    def run(self):
-
-        cv2.namedWindow("Camera")
-        cv2.setMouseCallback("Camera", self.mouse_callback)
-
-        while True:
-
-            ret, frame = self.cap.read()
-
-            if not ret:
-                break
-
-            # DRAW BUTTON
-            self.record_button.draw(frame)
-
-            # ==========================
-            # RECORDING
-            # ==========================
-
-            if self.recording:
-
-                elapsed = time.time() - self.start_time
-
-                self.frames.append(frame.copy())
-
-                cv2.putText(
-                    frame,
-                    f"Recording {elapsed:.1f}s",
-                    (20, 100),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    1,
-                    (0, 0, 255),
-                    3
-                )
-
-                if elapsed >= 4:
-
-                    self.recording = False
-
-                    print("Recording done")
-                    print("Frames:", len(self.frames))
-
-                    # SAVE VIDEO
-                    self.save_video()
-
-            cv2.imshow("Camera", frame)
-
-            if cv2.waitKey(1) & 0xFF == 27:
-                break
-
-        self.cap.release()
-        cv2.destroyAllWindows()
-
-    # ==========================
-    # SAVE VIDEO
-    # ==========================
-
-    def save_video(self):
-
-        if len(self.frames) == 0:
-            return
-
-        h, w = self.frames[0].shape[:2]
-
-        out = cv2.VideoWriter(
-            "video/recorded_video.avi",
-            cv2.VideoWriter_fourcc(*'XVID'),
-            25,
-            (w, h)
+        self.decoder_live = nn.Sequential(
+            nn.ConvTranspose2d(512,128,4,2,1), nn.ReLU(),
+            nn.ConvTranspose2d(128,64,4,2,1), nn.ReLU(),
+            nn.ConvTranspose2d(64,32,4,2,1), nn.ReLU(),
+            nn.ConvTranspose2d(32,16,4,2,1), nn.ReLU(),
+            nn.ConvTranspose2d(16,1,4,2,1), nn.Sigmoid()
         )
 
-        for f in self.frames:
-            out.write(f)
+        self.decoder_trace = nn.Sequential(
+            nn.ConvTranspose2d(512,128,4,2,1), nn.ReLU(),
+            nn.ConvTranspose2d(128,64,4,2,1), nn.ReLU(),
+            nn.ConvTranspose2d(64,32,4,2,1), nn.ReLU(),
+            nn.ConvTranspose2d(32,16,4,2,1), nn.ReLU(),
+            nn.ConvTranspose2d(16,3,4,2,1), nn.Tanh()
+        )
 
-        out.release()
+        self.classifier = nn.Sequential(
+            nn.AdaptiveAvgPool2d((1,1)),
+            nn.Flatten(),
+            nn.Linear(512,256), nn.ReLU(),
+            nn.Linear(256,2)
+        )
 
-        print("Video saved: video/recorded_video.avi")
+    def forward(self,x):
+        f = self.encoder(x)
+        return self.decoder_live(f), self.decoder_trace(f), self.classifier(f)
 
 
-# ==========================
-# MAIN
-# ==========================
+stdn_model = STDN_Plus_Model().to(DEVICE)
+stdn_model.load_state_dict(torch.load("src/train/stdn_plus_pami.pth", map_location=DEVICE))
+stdn_model.eval()
 
-app = CameraRecorder()
-app.run()
+# =============================
+# SVM MODEL (FACE RECOGNITION)
+# =============================
 
-model = joblib.load("face_antispoof_model.pkl")
+svm_model = joblib.load("models/best_svm_model.pkl")
+scaler = joblib.load("models/scaler.pkl")
+kpca = joblib.load("models/kpca.pkl")
+label_map = joblib.load("models/label_map.pkl")
 
-extractor = LBPVideoFeatureExtractor(color_spaces=["hsv", "ycrcb"])
-feature = extractor.extract("video/recorded_video.avi")
+# =============================
+# TRANSFORM STDN+
+# =============================
 
-y_score = model.predict_proba(feature)[:, 1]
-y_pred = model.predict(feature)
+transform = transforms.Compose([
+    transforms.Resize((256,256)),
+    transforms.ToTensor(),
+])
 
-print(y_score)
-print(y_pred)
+# =============================
+# FEATURE (SVM)
+# =============================
+
+def lbp_feature(img):
+    h, w = img.shape
+    lbp = np.zeros((h-2, w-2), dtype=np.uint8)
+
+    for i in range(1, h-1):
+        for j in range(1, w-1):
+            c = img[i,j]
+            binary = [
+                img[i-1,j-1]>c, img[i-1,j]>c, img[i-1,j+1]>c,
+                img[i,j+1]>c,
+                img[i+1,j+1]>c, img[i+1,j]>c, img[i+1,j-1]>c,
+                img[i,j-1]>c
+            ]
+            value = sum([b << k for k,b in enumerate(binary)])
+            lbp[i-1,j-1] = value
+
+    hist,_ = np.histogram(lbp.ravel(),256,[0,256])
+    return hist
+
+
+def gabor_feature(img):
+    kernels = []
+    for theta in np.arange(0, np.pi, np.pi/4):
+        k = cv2.getGaborKernel((9,9),1.0,theta,np.pi/2,0.5,0)
+        kernels.append(k)
+
+    feats = []
+    for k in kernels:
+        f = cv2.filter2D(img, cv2.CV_32F, k)
+        feats.append(f.flatten())
+
+    return np.hstack(feats)
+
+
+def extract_feature(face):
+    return np.hstack([gabor_feature(face), lbp_feature(face)])
+
+
+# =============================
+# FULL PIPELINE
+# =============================
+
+def predict_full(image_path):
+
+    # ===== STEP 1: ANTI SPOOF =====
+    img_pil = Image.open(image_path).convert("RGB")
+    img_tensor = transform(img_pil).unsqueeze(0).to(DEVICE)
+
+    with torch.no_grad():
+        _, _, cls_out = stdn_model(img_tensor)
+        pred = torch.argmax(cls_out, dim=1).item()
+
+    if pred == 0:
+        print("FAKE ❌")
+        return
+
+    print("REAL ✅")
+
+    # ===== STEP 2: FACE RECOGNITION =====
+    img_cv = cv2.imread(image_path)
+    gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+
+    face_cascade = cv2.CascadeClassifier("haarcascade_frontalface_default.xml")
+    faces = face_cascade.detectMultiScale(gray,1.3,5)
+
+    if len(faces) == 0:
+        print("No face detected")
+        return
+
+    for (x,y,w,h) in faces:
+
+        face = gray[y:y+h, x:x+w]
+        face = cv2.resize(face,(80,70))
+        face = cv2.equalizeHist(face)
+
+        feature = extract_feature(face).reshape(1,-1)
+        feature = scaler.transform(feature)
+        feature = kpca.transform(feature)
+
+        pred = svm_model.predict(feature)
+        name = label_map[int(pred[0])]
+
+        print("IDENTITY:", name)
+
+
+# =============================
+# TEST
+# =============================
+
+predict_full(r"E:\PythonFile\Project\Facial-Recognition\data\test\z7623414547355_787c4c547fc530947ade927cbb1d7125.jpg")

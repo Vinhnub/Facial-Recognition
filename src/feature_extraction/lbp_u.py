@@ -10,7 +10,7 @@ class LBPVideoFeatureExtractor:
         img_size=64,
         P=8,
         R=1,
-        color_spaces=("gray", "ycrcb"),
+        color_spaces=["gray", "ycrcb"],
         fps=25,
         window_sec=3
     ):
@@ -62,7 +62,6 @@ class LBPVideoFeatureExtractor:
         channels = []
 
         for space in self.COLOR_SPACES:
-
             if space == "gray":
 
                 img = cv2.cvtColor(face, cv2.COLOR_BGR2GRAY)
@@ -83,6 +82,7 @@ class LBPVideoFeatureExtractor:
                 img = cv2.cvtColor(face, cv2.COLOR_BGR2YCrCb)
                 channels.extend(cv2.split(img))
 
+
         return channels
 
     # ==========================
@@ -91,12 +91,7 @@ class LBPVideoFeatureExtractor:
 
     def extract_lbp(self, gray):
 
-        lbp = local_binary_pattern(
-            gray,
-            self.P,
-            self.R,
-            method="default"
-        ).astype(np.uint8)
+        lbp = local_binary_pattern(gray, self.P, self.R, method="default").astype(np.uint8)
 
         bits = ((lbp[..., None] >> np.arange(self.P)) & 1).astype(np.uint8)
 
@@ -106,7 +101,6 @@ class LBPVideoFeatureExtractor:
         uniform_mask = transitions <= 2
 
         non_uniform_label = self.P*(self.P-1) + 2
-
         lbp_uniform = lbp.copy()
         lbp_uniform[~uniform_mask] = non_uniform_label
 
@@ -117,9 +111,9 @@ class LBPVideoFeatureExtractor:
             bins=n_bins,
             range=(0, n_bins)
         )
-
         hist = hist.astype("float")
         hist /= (hist.sum() + 1e-6)
+        
 
         return hist
 
@@ -163,11 +157,21 @@ class LBPVideoFeatureExtractor:
             if face is None:
                 continue
 
+            # ======================
+            # SHOW CROPPED FACE
+            # ======================
+
+            cv2.imshow("Face Crop", face)
+
+            if cv2.waitKey(1) & 0xFF == 27:
+                break
+
             feat = self.extract_frame_feature(face)
 
             features.append(feat)
 
         cap.release()
+        cv2.destroyAllWindows()
 
         if len(features) == 0:
             return None
