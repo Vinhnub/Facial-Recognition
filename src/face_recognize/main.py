@@ -2,8 +2,6 @@ import cv2
 import joblib
 import numpy as np
 
-USE_LBP = True   # False = Gabor only
-                  # True  = Gabor + LBP
 
 # =============================
 # LOAD MODEL
@@ -11,10 +9,13 @@ USE_LBP = True   # False = Gabor only
 
 model = joblib.load("models/best_svm_model.pkl")
 scaler = joblib.load("models/scaler.pkl")
-kpca = joblib.load("models/kpca.pkl")
+pca = joblib.load("models/pca.pkl")
 label_map = joblib.load("models/label_map.pkl")
 
-print("USE_LBP =", USE_LBP)
+
+# =============================
+# LBP FEATURE
+# =============================
 
 def lbp_feature(img):
 
@@ -27,34 +28,37 @@ def lbp_feature(img):
             center = img[i, j]
 
             binary = [
-                img[i-1, j-1] > center,
-                img[i-1, j] > center,
-                img[i-1, j+1] > center,
-                img[i, j+1] > center,
-                img[i+1, j+1] > center,
-                img[i+1, j] > center,
-                img[i+1, j-1] > center,
-                img[i, j-1] > center
+                img[i-1,j-1] > center,
+                img[i-1,j] > center,
+                img[i-1,j+1] > center,
+                img[i,j+1] > center,
+                img[i+1,j+1] > center,
+                img[i+1,j] > center,
+                img[i+1,j-1] > center,
+                img[i,j-1] > center
             ]
 
             value = sum([b << k for k, b in enumerate(binary)])
 
-            lbp[i-1, j-1] = value
+            lbp[i-1,j-1] = value
 
-    hist, _ = np.histogram(lbp.ravel(), 256, [0,256])
+    hist,_ = np.histogram(lbp.ravel(),256,[0,256])
+
+    hist = hist.astype("float")
+    hist /= (hist.sum() + 1e-7)
 
     return hist
 
 
 # =============================
-# GABOR FEATURE
+# GABOR FEATURE (STAT)
 # =============================
 
 def gabor_feature(img):
 
-    kernels = []
+    features = []
 
-    for theta in np.arange(0, np.pi, np.pi/4):
+    for theta in np.arange(0, np.pi, np.pi/8):
 
         kernel = cv2.getGaborKernel(
             (9,9),
@@ -66,17 +70,14 @@ def gabor_feature(img):
             ktype=cv2.CV_32F
         )
 
-        kernels.append(kernel)
-
-    features = []
-
-    for kernel in kernels:
-
         filtered = cv2.filter2D(img, cv2.CV_32F, kernel)
 
-        features.append(filtered.flatten())
+        mean = filtered.mean()
+        std = filtered.std()
 
-    return np.hstack(features)
+        features.extend([mean, std])
+
+    return np.array(features)
 
 
 # =============================
@@ -86,12 +87,9 @@ def gabor_feature(img):
 def extract_feature(face):
 
     gabor = gabor_feature(face)
+    lbp = lbp_feature(face)
 
-    if USE_LBP:
-        lbp = lbp_feature(face)
-        feature = np.hstack([gabor, lbp])
-    else:
-        feature = gabor
+    feature = np.hstack([gabor, lbp])
 
     return feature
 
@@ -117,46 +115,27 @@ while True:
 
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-    faces = face_cascade.detectMultiScale(
-        gray,
-        1.3,
-        5
-    )
+    faces = face_cascade.detectMultiScale(gray, 1.3, 5)
 
     for (x,y,w,h) in faces:
 
         face = gray[y:y+h, x:x+w]
 
         face = cv2.resize(face,(80,70))
-
         face = cv2.equalizeHist(face)
-
-        # =============================
-        # FEATURE
-        # =============================
 
         feature = extract_feature(face).reshape(1,-1)
 
-        print("Feature shape:", feature.shape)
-
-        # =============================
-        # SCALE + KPCA
-        # =============================
-
+        # SCALE
         feature = scaler.transform(feature)
-        feature = kpca.transform(feature)
 
-        # =============================
+        # PCA
+        feature = pca.transform(feature)
+
         # PREDICT
-        # =============================
-
         pred = model.predict(feature)
 
         name = label_map[int(pred[0])]
-
-        # =============================
-        # DRAW
-        # =============================
 
         cv2.rectangle(frame,(x,y),(x+w,y+h),(0,255,0),2)
 
