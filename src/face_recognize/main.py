@@ -2,29 +2,18 @@ import cv2
 import joblib
 import numpy as np
 
-
-# =============================
-# LOAD MODEL
-# =============================
-
-model = joblib.load("models/best_svm_model.pkl")
-scaler = joblib.load("models/scaler.pkl")
-pca = joblib.load("models/pca.pkl")
+model = joblib.load("models/lbp_model.pkl")
 label_map = joblib.load("models/label_map.pkl")
-
 
 # =============================
 # LBP FEATURE
 # =============================
-
 def lbp_feature(img):
-
     h, w = img.shape
     lbp = np.zeros((h-2, w-2), dtype=np.uint8)
 
     for i in range(1, h-1):
         for j in range(1, w-1):
-
             center = img[i, j]
 
             binary = [
@@ -39,11 +28,9 @@ def lbp_feature(img):
             ]
 
             value = sum([b << k for k, b in enumerate(binary)])
-
             lbp[i-1,j-1] = value
 
     hist,_ = np.histogram(lbp.ravel(),256,[0,256])
-
     hist = hist.astype("float")
     hist /= (hist.sum() + 1e-7)
 
@@ -51,109 +38,75 @@ def lbp_feature(img):
 
 
 # =============================
-# GABOR FEATURE (STAT)
+# LOAD IMAGE
 # =============================
+img_path = r"C:\Users\Lenovo\Desktop\face_recognize\test\WIN_20260317_16_07_29_Pro.jpg"
 
-def gabor_feature(img):
+img = cv2.imread(img_path)
 
-    features = []
+if img is None:
+    print("Cannot read image")
+    exit()
 
-    for theta in np.arange(0, np.pi, np.pi/8):
-
-        kernel = cv2.getGaborKernel(
-            (9,9),
-            1.0,
-            theta,
-            np.pi/2,
-            0.5,
-            0,
-            ktype=cv2.CV_32F
-        )
-
-        filtered = cv2.filter2D(img, cv2.CV_32F, kernel)
-
-        mean = filtered.mean()
-        std = filtered.std()
-
-        features.extend([mean, std])
-
-    return np.array(features)
-
+gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
 # =============================
-# FEATURE PIPELINE
+# FACE DETECT
 # =============================
+face_cascade = cv2.CascadeClassifier("haarcascade_frontalface_default.xml")
 
-def extract_feature(face):
-
-    gabor = gabor_feature(face)
-    lbp = lbp_feature(face)
-
-    feature = np.hstack([gabor, lbp])
-
-    return feature
-
-
-# =============================
-# FACE DETECTOR
-# =============================
-
-face_cascade = cv2.CascadeClassifier(
-    "haarcascade_frontalface_default.xml"
+faces = face_cascade.detectMultiScale(
+    gray,
+    scaleFactor=1.2,
+    minNeighbors=6,
+    minSize=(50,50)
 )
 
-cap = cv2.VideoCapture(0)
+if len(faces) == 0:
+    print("No face detected")
+    exit()
 
-print("Press Q to exit")
+# =============================
+# PREDICT
+# =============================
+for (x,y,w,h) in faces:
 
-while True:
+    pad = int(0.2 * w)
 
-    ret, frame = cap.read()
+    y1 = max(0, y-pad)
+    y2 = min(gray.shape[0], y+h+pad)
+    x1 = max(0, x-pad)
+    x2 = min(gray.shape[1], x+w+pad)
 
-    if not ret:
-        break
+    face = gray[y1:y2, x1:x2]
 
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    face = cv2.resize(face,(80,70))
+    face = cv2.equalizeHist(face)
 
-    faces = face_cascade.detectMultiScale(gray, 1.3, 5)
+    feature = lbp_feature(face).reshape(1,-1)
 
-    for (x,y,w,h) in faces:
+    probs = model.predict_proba(feature)
+    confidence = np.max(probs)
+    pred = np.argmax(probs)
 
-        face = gray[y:y+h, x:x+w]
+    if confidence < 0.85:
+        name = "Unknown"
+    else:
+        name = label_map[pred]
 
-        face = cv2.resize(face,(80,70))
-        face = cv2.equalizeHist(face)
+    print(f"{name} ({confidence:.2f})")
 
-        feature = extract_feature(face).reshape(1,-1)
+    cv2.rectangle(img,(x,y),(x+w,y+h),(0,255,0),2)
+    cv2.putText(
+        img,
+        f"{name} ({confidence:.2f})",
+        (x,y-10),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.8,
+        (0,255,0),
+        2
+    )
 
-        # SCALE
-        feature = scaler.transform(feature)
-
-        # PCA
-        feature = pca.transform(feature)
-
-        # PREDICT
-        pred = model.predict(feature)
-
-        name = label_map[int(pred[0])]
-
-        cv2.rectangle(frame,(x,y),(x+w,y+h),(0,255,0),2)
-
-        cv2.putText(
-            frame,
-            name,
-            (x,y-10),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.9,
-            (0,255,0),
-            2
-        )
-
-    cv2.imshow("Face Recognition",frame)
-
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
-
-
-cap.release()
+cv2.imshow("Result", img)
+cv2.waitKey(0)
 cv2.destroyAllWindows()
